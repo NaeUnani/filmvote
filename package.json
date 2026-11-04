@@ -1,0 +1,30 @@
+{
+  "name": "filmvote",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0",
+    "build": "next build",
+    "start": "next start --hostname 0.0.0.0",
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "refresh-metadata": "node scripts/refresh-metadata.mjs",
+    "deploy": "node scripts/deploy.mjs",
+    "format": "prettier --write app components lib scripts tests next.config.ts"
+  },
+  "dependencies": {
+    "lucide-react": "latest",
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "prettier": "^3.9.10",
+    "typescript": "latest",
+    "vercel": "latest"
+  },
+  "type": "module"
+}
