@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import type { Snapshot, Movie } from "@/lib/types";
 import Trailer from "./Trailer";
+import ConfirmDialog from "./ConfirmDialog";
 export async function request(path: string, body?: unknown, method = "POST") {
   const r = await fetch(
     "/api/" + path,
@@ -154,7 +155,7 @@ function MovieCard({
         </details>
         <button
           className={`vote-button ${voted ? "voted" : ""}`}
-          disabled={disabled || voted || pending}
+          disabled={disabled || pending}
           onClick={onVote}
         >
           {pending ? (
@@ -166,7 +167,9 @@ function MovieCard({
           )}
           <span>
             {voted
-              ? "Pilihanmu"
+              ? disabled
+                ? "Pilihanmu"
+                : "Batalkan vote"
               : disabled
                 ? "Voting tidak tersedia"
                 : "Vote film ini"}
@@ -184,22 +187,30 @@ export default function FilmApp() {
     [tab, setTab] = useState("explore"),
     [active, setActive] = useState(""),
     [sheet, setSheet] = useState(false),
-    [pending, setPending] = useState(""),
+    [voteDialog, setVoteDialog] = useState<{
+      movie: Movie;
+      cancel: boolean;
+    } | null>(null),
+    [quotaDialog, setQuotaDialog] = useState(false),
+    [pending, setPending] = useState(false),
+    [voteError, setVoteError] = useState(""),
     [toast, setToast] = useState(""),
     [query, setQuery] = useState("");
   const seenPhase = useRef("");
+  const voteVersion = useRef(0);
   const refresh = useCallback(async () => {
+    const version = voteVersion.current;
     try {
-      const d = await request("state");
+      const d: Snapshot = await request("state");
+      if (version !== voteVersion.current) return;
       setState(d);
-      setPlaylist((p) => p || d.config.playlists[0]?.id || "");
-      setActive((id) => (d.movies.some((m: Movie) => m.id === id) ? id : ""));
+      setActive((id) => (d.movies.some((m) => m.id === id) ? id : ""));
       if (d.phase === "ended" && seenPhase.current !== "ended")
         setTab("results");
       seenPhase.current = d.phase;
       setError("");
     } catch (e) {
-      setError((e as Error).message);
+      if (version === voteVersion.current) setError((e as Error).message);
     }
   }, []);
   useEffect(() => {
@@ -214,27 +225,48 @@ export default function FilmApp() {
     const t = setTimeout(() => setToast(""), 3500);
     return () => clearTimeout(t);
   }, [toast]);
-  async function cast(id: string) {
-    setPending(id);
+  async function submitVote() {
+    if (!voteDialog || pending) return;
+    const { movie, cancel } = voteDialog;
+    voteVersion.current++;
+    setPending(true);
+    setVoteError("");
     try {
-      setState(await request("vote", { movieId: id }));
-      setToast("Vote tersimpan.");
+      const d: Snapshot = await request(
+        "vote",
+        { movieId: movie.id },
+        cancel ? "DELETE" : "POST",
+      );
+      setState(d);
+      setVoteDialog(null);
+      if (!cancel && d.remaining === 0) setQuotaDialog(true);
+      else setToast(cancel ? "Vote dibatalkan." : "Vote tersimpan.");
     } catch (e) {
-      setToast((e as Error).message);
+      setVoteError((e as Error).message);
       await refresh();
     } finally {
-      setPending("");
+      voteVersion.current++;
+      setPending(false);
     }
   }
-  const selected = state?.config.playlists.find((p) => p.id === playlist);
+  function showTab(nextTab: string) {
+    setTab(nextTab);
+    setActive("");
+    if (nextTab === "votes") setQuery("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  const selected =
+    state?.config.playlists.find((p) => p.id === playlist) ||
+    state?.config.playlists[0];
   const movies = (state?.movies || []).filter(
     (m) =>
-      m.playlistId === playlist &&
+      (tab === "votes"
+        ? state?.voted.includes(m.id)
+        : m.playlistId === selected?.id) &&
       (!query ||
         `${m.title} ${m.genre} ${m.actors}`
           .toLowerCase()
-          .includes(query.toLowerCase())) &&
-      (tab !== "votes" || state?.voted.includes(m.id)),
+          .includes(query.toLowerCase())),
   );
   const ranked = [...movies].sort(
     (a, b) => (state?.counts[b.id] || 0) - (state?.counts[a.id] || 0),
@@ -315,16 +347,32 @@ export default function FilmApp() {
           <div className="ambient-orb" />
         </section>
         <div className="playlist-toolbar">
-          <button className="playlist-picker" onClick={() => setSheet(true)}>
-            <span className="playlist-icon">
-              <ListVideo size={18} />
-            </span>
-            <span>
-              <small>PLAYLIST</small>
-              <strong>{selected?.name || "Playlist"}</strong>
-            </span>
-            <ChevronDown size={17} />
-          </button>
+          {tab === "votes" ? (
+            <div className="playlist-picker">
+              <span className="playlist-icon">
+                <ListVideo size={18} />
+              </span>
+              <span>
+                <small>PLAYLIST</small>
+                <strong>Semua playlist</strong>
+              </span>
+            </div>
+          ) : (
+            <button
+              className="playlist-picker"
+              disabled={!selected}
+              onClick={() => setSheet(true)}
+            >
+              <span className="playlist-icon">
+                <ListVideo size={18} />
+              </span>
+              <span>
+                <small>PLAYLIST</small>
+                <strong>{selected?.name || "Belum ada playlist"}</strong>
+              </span>
+              <ChevronDown size={17} />
+            </button>
+          )}
           <span
             className={`status-pill ${state?.phase === "open" ? "" : "closed"}`}
           >
@@ -422,34 +470,44 @@ export default function FilmApp() {
           </div>
         ) : (
           <div className="movie-list">
-            {movies.map((m, i) => (
-              <MovieCard
-                key={m.id}
-                movie={m}
-                index={i}
-                active={active === m.id}
-                count={state?.counts[m.id] || 0}
-                voted={!!state?.voted.includes(m.id)}
-                disabled={state?.phase !== "open" || state.remaining === 0}
-                pending={pending === m.id}
-                onVote={() => void cast(m.id)}
-                onActive={activate(m.id)}
-              />
-            ))}
+            {movies.map((m, i) => {
+              const voted = !!state?.voted.includes(m.id);
+              return (
+                <MovieCard
+                  key={m.id}
+                  movie={m}
+                  index={i}
+                  active={active === m.id}
+                  count={state?.counts[m.id] || 0}
+                  voted={voted}
+                  disabled={
+                    state?.phase !== "open" || (!voted && state.remaining === 0)
+                  }
+                  pending={pending && voteDialog?.movie.id === m.id}
+                  onVote={() => {
+                    setVoteError("");
+                    setVoteDialog({ movie: m, cancel: voted });
+                  }}
+                  onActive={activate(m.id)}
+                />
+              );
+            })}
           </div>
         )}
         {state && movies.length === 0 && (
           <div className="empty-state">
             <Clapperboard size={28} />
             <h2>{tab === "votes" ? "Belum memilih" : "Belum ada film"}</h2>
-            <button
-              onClick={() => {
-                setTab("explore");
-                setSheet(true);
-              }}
-            >
-              Pilih playlist <ArrowUpRight size={15} />
-            </button>
+            {selected && (
+              <button
+                onClick={() => {
+                  setTab("explore");
+                  setSheet(true);
+                }}
+              >
+                Pilih playlist <ArrowUpRight size={15} />
+              </button>
+            )}
           </div>
         )}
         <nav className="bottom-nav" aria-label="Navigasi utama">
@@ -461,11 +519,7 @@ export default function FilmApp() {
             <button
               key={t.id}
               className={tab === t.id ? "selected" : ""}
-              onClick={() => {
-                setTab(t.id);
-                setActive("");
-                window.scrollTo({ top: 0, behavior: "smooth" });
-              }}
+              onClick={() => showTab(t.id)}
             >
               <t.icon size={21} />
               <span>{t.label}</span>
@@ -478,6 +532,37 @@ export default function FilmApp() {
             <Check size={16} />
             {toast}
           </div>
+        )}
+        {voteDialog && (
+          <ConfirmDialog
+            key="vote"
+            title={voteDialog.cancel ? "Batalkan vote?" : "Vote film ini?"}
+            description={
+              voteDialog.cancel
+                ? `Batalkan vote untuk ${voteDialog.movie.title} dan kembalikan satu slot kuota.`
+                : `Gunakan satu slot kuota untuk memilih ${voteDialog.movie.title}.`
+            }
+            confirmLabel={voteDialog.cancel ? "Ya, batalkan vote" : "Ya, vote"}
+            cancelLabel={voteDialog.cancel ? "Pertahankan vote" : "Batal"}
+            busy={pending}
+            error={voteError}
+            onConfirm={() => void submitVote()}
+            onDismiss={() => setVoteDialog(null)}
+          />
+        )}
+        {quotaDialog && (
+          <ConfirmDialog
+            key="quota"
+            title="Ketiga vote sudah tersimpan"
+            description="Buka Pilihanku untuk melihat ketiga film pilihanmu."
+            confirmLabel="Buka Pilihanku"
+            cancelLabel="Tutup"
+            onConfirm={() => {
+              setQuotaDialog(false);
+              showTab("votes");
+            }}
+            onDismiss={() => setQuotaDialog(false)}
+          />
         )}
         {sheet && (
           <div className="sheet-backdrop" onClick={() => setSheet(false)}>
@@ -502,7 +587,7 @@ export default function FilmApp() {
               {state?.config.playlists.map((p) => (
                 <button
                   key={p.id}
-                  className={`sheet-playlist ${playlist === p.id ? "chosen" : ""}`}
+                  className={`sheet-playlist ${selected?.id === p.id ? "chosen" : ""}`}
                   onClick={() => {
                     setPlaylist(p.id);
                     setActive("");
@@ -519,7 +604,7 @@ export default function FilmApp() {
                       film
                     </em>
                   </span>
-                  {playlist === p.id ? (
+                  {selected?.id === p.id ? (
                     <Check size={19} />
                   ) : (
                     <ArrowUpRight size={19} />

@@ -79,6 +79,6 @@ npm run build
 npm run refresh-metadata
 ```
 
-Perintah terakhir memperbarui rating empat film starter dari OMDb. Film baru mendapat metadata melalui formulir admin. Pencocokan berdasarkan judul YouTube dapat salah; periksa judul/tahun sebelum menyimpan. Sinopsis dari OMDb mengikuti bahasa yang disediakan sumber dan bisa diedit di admin.
+Perintah terakhir memperbarui rating empat film starter dari OMDb. Di formulir admin, **Cari detail** mengambil metadata OMDb dan mengisi kolom sinopsis dengan terjemahan bahasa Indonesia dari MyMemory. Jika terjemahan gagal dan sinopsis Indonesia belum tersedia, plot OMDb ditampilkan sebagai referensi untuk diisi manual. Periksa judul dan tahun sebelum menyimpan karena pencocokan berdasarkan judul YouTube bisa keliru.
 
 Referensi: [YouTube IFrame API](https://developers.google.com/youtube/iframe_api_reference), [OMDb](https://www.omdbapi.com/), [Vercel request headers](https://vercel.com/docs/headers/request-headers), [Upstash REST API](https://upstash.com/docs/redis/features/restapi).

@@ -101,7 +101,7 @@ if now>=c.endsAt and (not c.archivedAt or c.archivedAt==0) then local list={};fo
 if changed then redis.call('SET',KEYS[1],cjson.encode(c)) end
 return cjson.encode(c)`;
 async function init(): Promise<Config> {
-  return JSON.parse(
+  const config: Config = JSON.parse(
     await redis([
       "EVAL",
       initLua,
@@ -114,6 +114,9 @@ async function init(): Promise<Config> {
       Date.now(),
     ]),
   );
+  // Redis Lua encodes empty arrays as objects.
+  if (!Array.isArray(config.playlists)) config.playlists = [];
+  return config;
 }
 const countKey = (round: string) =>
   round === "initial" ? "fv:counts" : "fv:counts:" + round;
@@ -124,23 +127,38 @@ function displayMovies(c: Config, movies: Movie[]) {
     phase(c) === "ended" && Array.isArray(c.lastMovies) ? c.lastMovies : movies
   ).sort((a, b) => a.addedAt - b.addedAt || a.id.localeCompare(b.id));
 }
+function voterChoices(movies: Movie[], ids: string[]) {
+  const available = new Set(movies.map((m) => m.id));
+  return ids.filter((id) => available.has(id));
+}
+function visibleCounts(movies: Movie[], counts: Record<string, number>) {
+  const visible: Record<string, number> = {};
+  for (const { id } of movies) {
+    if (Object.hasOwn(counts, id)) visible[id] = counts[id];
+  }
+  return visible;
+}
 export async function snapshot(voter: string): Promise<Snapshot> {
   if (!remote())
-    return local((d) => ({
-      config: d.config,
-      movies: displayMovies(d.config, d.movies),
-      library: Object.values(d.library).sort((a, b) =>
-        a.title.localeCompare(b.title),
-      ),
-      counts: d.counts,
-      voted: d.voters[voter] || [],
-      remaining: Math.max(0, 3 - (d.voters[voter] || []).length),
-      phase: phase(d.config),
-      storage: "local",
-    }));
+    return local((d) => {
+      const movies = displayMovies(d.config, d.movies);
+      const voted = voterChoices(movies, d.voters[voter] || []);
+      return {
+        config: d.config,
+        movies,
+        library: Object.values(d.library).sort((a, b) =>
+          a.title.localeCompare(b.title),
+        ),
+        counts: visibleCounts(movies, d.counts),
+        voted,
+        remaining: Math.max(0, 3 - voted.length),
+        phase: phase(d.config),
+        storage: "local",
+      };
+    });
   const config = await init();
   const round = config.roundId || "initial";
-  const [movies, library, counts, voted] = await Promise.all([
+  const [movies, library, counts, choices] = await Promise.all([
     redis(["HVALS", "fv:movies"]),
     redis(["HVALS", "fv:library"]),
     redis(["HGETALL", countKey(round)]),
@@ -149,24 +167,52 @@ export async function snapshot(voter: string): Promise<Snapshot> {
   const values: Record<string, number> = {};
   for (let i = 0; i < counts.length; i += 2)
     values[counts[i]] = Number(counts[i + 1]);
+  const visibleMovies = displayMovies(
+    config,
+    movies.map((s: string) => JSON.parse(s)),
+  );
+  const voted = voterChoices(visibleMovies, choices);
   return {
     config,
-    movies: displayMovies(
-      config,
-      movies.map((s: string) => JSON.parse(s)),
-    ),
+    movies: visibleMovies,
     library: library
       .map((s: string) => JSON.parse(s))
       .sort((a: Movie, b: Movie) => a.title.localeCompare(b.title)),
-    counts: values,
+    counts: visibleCounts(visibleMovies, values),
     voted,
     remaining: Math.max(0, 3 - voted.length),
     phase: phase(config),
     storage: "redis",
   };
 }
-export const voteLua = `local config=cjson.decode(redis.call('GET',KEYS[1]));local now=tonumber(ARGV[2]) or 0;if config.roundId and config.roundId~=ARGV[3] then return 'stale' end;if config.endsAt and now>=config.endsAt then return 'closed' end;if config.startsAt and now<config.startsAt then return 'scheduled' end;if not config.votingOpen or (config.archivedAt and config.archivedAt>0) then return 'closed' end;if redis.call('HEXISTS',KEYS[2],ARGV[1])==0 then return 'missing' end;if redis.call('SISMEMBER',KEYS[3],ARGV[1])==1 then return 'duplicate' end;if redis.call('SCARD',KEYS[3])>=3 then return 'limit' end;redis.call('SADD',KEYS[3],ARGV[1]);redis.call('HINCRBY',KEYS[4],ARGV[1],1);return 'ok'`;
-export async function vote(voter: string, id: string) {
+export const voteLua = `
+local config=cjson.decode(redis.call('GET',KEYS[1]))
+local id=ARGV[1]
+local now=tonumber(ARGV[2]) or 0
+if config.roundId and config.roundId~=ARGV[3] then return 'stale' end
+if config.endsAt and now>=config.endsAt then return 'closed' end
+if config.startsAt and now<config.startsAt then return 'scheduled' end
+if not config.votingOpen or (config.archivedAt and config.archivedAt>0) then return 'closed' end
+if redis.call('HEXISTS',KEYS[2],id)==0 then return 'missing' end
+
+if ARGV[4]=='cancel' then
+  if redis.call('SREM',KEYS[3],id)==1 then
+    local count=tonumber(redis.call('HGET',KEYS[4],id)) or 0
+    if count>0 then redis.call('HINCRBY',KEYS[4],id,-1) end
+  end
+  return 'ok'
+end
+
+if redis.call('SISMEMBER',KEYS[3],id)==1 then return 'duplicate' end
+-- Remove choices for films deleted during this round before checking the quota.
+for _,chosen in ipairs(redis.call('SMEMBERS',KEYS[3])) do
+  if redis.call('HEXISTS',KEYS[2],chosen)==0 then redis.call('SREM',KEYS[3],chosen) end
+end
+if redis.call('SCARD',KEYS[3])>=3 then return 'limit' end
+redis.call('SADD',KEYS[3],id)
+redis.call('HINCRBY',KEYS[4],id,1)
+return 'ok'`;
+export async function vote(voter: string, id: string, cancel = false) {
   if (remote()) {
     const config = await init();
     const round = config.roundId || "initial";
@@ -181,13 +227,21 @@ export async function vote(voter: string, id: string) {
       id,
       Date.now(),
       round,
+      cancel ? "cancel" : "cast",
     ]);
   }
   return local((d) => {
     if (phase(d.config) === "scheduled") return "scheduled";
     if (phase(d.config) !== "open") return "closed";
     if (!d.movies.some((m) => m.id === id)) return "missing";
-    const voted = d.voters[voter] || [];
+    const voted = voterChoices(d.movies, d.voters[voter] || []);
+    if (cancel) {
+      if (voted.includes(id)) {
+        d.voters[voter] = voted.filter((chosen) => chosen !== id);
+        d.counts[id] = Math.max(0, (d.counts[id] || 0) - 1);
+      }
+      return "ok";
+    }
     if (voted.includes(id)) return "duplicate";
     if (voted.length >= 3) return "limit";
     d.voters[voter] = [...voted, id];
@@ -249,6 +303,49 @@ export async function deleteMovie(id: string) {
     const m = d.movies.find((m) => m.id === id);
     if (m) d.library[m.youtubeId] = m;
     d.movies = d.movies.filter((m) => m.id !== id);
+  });
+}
+export async function deletePlaylist(id: string) {
+  if (remote()) {
+    await init();
+    await redis([
+      "EVAL",
+      `local c=cjson.decode(redis.call('GET',KEYS[1]))
+      local id=ARGV[1]
+      local found=false
+      for i,p in ipairs(c.playlists) do
+        if p.id==id then table.remove(c.playlists,i);found=true;break end
+      end
+      if not found then return 1 end
+      local archived={}
+      for _,m in ipairs(c.lastMovies or {}) do
+        if m.playlistId~=id then table.insert(archived,m) end
+      end
+      if c.lastMovies then c.lastMovies=archived end
+      for _,raw in ipairs(redis.call('HVALS',KEYS[2])) do
+        local m=cjson.decode(raw)
+        if m.playlistId==id then
+          redis.call('HSETNX',KEYS[3],m.youtubeId,raw)
+          redis.call('HDEL',KEYS[2],m.id)
+        end
+      end
+      redis.call('SET',KEYS[1],cjson.encode(c))
+      return 1`,
+      3,
+      "fv:config",
+      "fv:movies",
+      "fv:library",
+      id,
+    ]);
+    return;
+  }
+  return local((d) => {
+    d.config.playlists = d.config.playlists.filter((p) => p.id !== id);
+    d.movies = d.movies.filter((m) => m.playlistId !== id);
+    if (d.config.lastMovies)
+      d.config.lastMovies = d.config.lastMovies.filter(
+        (m) => m.playlistId !== id,
+      );
   });
 }
 export async function updateConfig(change: {

@@ -16,10 +16,12 @@ import {
   Library,
 } from "lucide-react";
 import { request } from "./FilmApp";
+import ConfirmDialog from "./ConfirmDialog";
 import type { Movie, Snapshot } from "@/lib/types";
 const inputDate = (n: number) =>
   new Date(n + 7 * 3600000).toISOString().slice(0, 16);
 const timestamp = (s: string) => new Date(s + ":00+07:00").getTime();
+type MovieDraft = Movie & { sourceSynopsis?: string };
 export default function Admin() {
   const [auth, setAuth] = useState<boolean | null>(null),
     [username, setUsername] = useState("naenaenae"),
@@ -31,9 +33,13 @@ export default function Admin() {
     [title, setTitle] = useState(""),
     [year, setYear] = useState(""),
     [playlist, setPlaylist] = useState(""),
-    [draft, setDraft] = useState<Movie | null>(null),
+    [draft, setDraft] = useState<MovieDraft | null>(null),
     [newName, setNewName] = useState(""),
-    [confirmDelete, setConfirmDelete] = useState(""),
+    [confirmDelete, setConfirmDelete] = useState<{
+      kind: "movie" | "playlist";
+      id: string;
+      title: string;
+    } | null>(null),
     [tab, setTab] = useState("voting"),
     [query, setQuery] = useState(""),
     [start, setStart] = useState(inputDate(Date.now())),
@@ -41,7 +47,14 @@ export default function Admin() {
   async function load(syncDates = false) {
     const d: Snapshot = await request("admin/state");
     setState(d);
-    setPlaylist((p) => p || d.config.playlists[0]?.id || "");
+    setPlaylist((id) =>
+      d.config.playlists.some((p) => p.id === id)
+        ? id
+        : d.config.playlists[0]?.id || "",
+    );
+    setDraft((movie) =>
+      d.config.playlists.some((p) => p.id === movie?.playlistId) ? movie : null,
+    );
     if (syncDates) {
       const now = Date.now();
       setStart(inputDate(d.phase === "ended" ? now : d.config.startsAt || now));
@@ -106,7 +119,12 @@ export default function Admin() {
   const picker = (
     <label>
       Playlist
-      <select value={playlist} onChange={(e) => setPlaylist(e.target.value)}>
+      <select
+        value={playlist}
+        onChange={(e) => setPlaylist(e.target.value)}
+        disabled={!playlist}
+      >
+        {!playlist && <option value="">Buat playlist terlebih dahulu</option>}
         {state?.config.playlists.map((p) => (
           <option key={p.id} value={p.id}>
             {p.name}
@@ -309,7 +327,9 @@ export default function Admin() {
                       </div>
                       <button
                         className="small-button"
-                        disabled={busy || added || state?.phase === "ended"}
+                        disabled={
+                          busy || !playlist || added || state?.phase === "ended"
+                        }
                         onClick={() =>
                           void run(async () => {
                             await request("admin/restore", {
@@ -374,7 +394,10 @@ export default function Admin() {
                             year,
                             playlistId: playlist,
                           });
-                          setDraft(d.movie);
+                          setDraft({
+                            ...d.movie,
+                            sourceSynopsis: d.sourceSynopsis,
+                          });
                           setMessage(d.warning || "Detail ditemukan.");
                         });
                       }}
@@ -412,7 +435,10 @@ export default function Admin() {
                           />
                         </label>
                       </div>
-                      <button className="primary-button" disabled={busy}>
+                      <button
+                        className="primary-button"
+                        disabled={busy || !playlist}
+                      >
                         {busy ? (
                           <LoaderCircle className="spin" size={17} />
                         ) : (
@@ -444,7 +470,8 @@ export default function Admin() {
                       onSubmit={(e) => {
                         e.preventDefault();
                         void run(async () => {
-                          await request("admin/movie", draft);
+                          const { sourceSynopsis, ...movie } = draft;
+                          await request("admin/movie", movie);
                           setDraft(null);
                           setUrl("");
                           setTitle("");
@@ -478,15 +505,23 @@ export default function Admin() {
                       {field("actors", "Pemeran")}
                       {field("director", "Sutradara")}
                       <label>
-                        Sinopsis
+                        Sinopsis bahasa Indonesia
                         <textarea
                           rows={3}
+                          maxLength={1000}
+                          placeholder="Tulis ringkasan cerita dalam bahasa Indonesia"
                           value={draft.synopsis}
                           onChange={(e) =>
                             setDraft({ ...draft, synopsis: e.target.value })
                           }
                         />
                       </label>
+                      {draft.sourceSynopsis && (
+                        <p className="field-hint">
+                          Referensi dari OMDb untuk admin:{" "}
+                          {draft.sourceSynopsis}
+                        </p>
+                      )}
                       <div className="form-row">
                         {field("imdb", "IMDb")}
                         {field("tomatoes", "Tomatoes")}
@@ -535,13 +570,33 @@ export default function Admin() {
                 <section className="admin-collection">
                   {state?.config.playlists.map((p) => (
                     <div key={p.id}>
-                      <h3>
-                        {p.name}
-                        <span>
-                          {movies.filter((m) => m.playlistId === p.id).length}{" "}
-                          film
-                        </span>
-                      </h3>
+                      <div className="admin-playlist-heading">
+                        <h3>
+                          {p.name}
+                          <span>
+                            {
+                              state.movies.filter((m) => m.playlistId === p.id)
+                                .length
+                            }{" "}
+                            film
+                          </span>
+                        </h3>
+                        <button
+                          className="icon-button danger"
+                          aria-label={`Hapus playlist ${p.name}`}
+                          disabled={busy}
+                          onClick={() => {
+                            setMessage("");
+                            setConfirmDelete({
+                              kind: "playlist",
+                              id: p.id,
+                              title: p.name,
+                            });
+                          }}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
                       {movies
                         .filter((m) => m.playlistId === p.id)
                         .map((m) => (
@@ -566,7 +621,15 @@ export default function Admin() {
                             <button
                               className="icon-button danger"
                               aria-label={`Hapus ${m.title}`}
-                              onClick={() => setConfirmDelete(m.id)}
+                              disabled={busy}
+                              onClick={() => {
+                                setMessage("");
+                                setConfirmDelete({
+                                  kind: "movie",
+                                  id: m.id,
+                                  title: m.title,
+                                });
+                              }}
                             >
                               <Trash2 size={15} />
                             </button>
@@ -593,41 +656,40 @@ export default function Admin() {
           </>
         )}
         {confirmDelete && (
-          <div className="sheet-backdrop" onClick={() => setConfirmDelete("")}>
-            <section
-              className="playlist-sheet confirm-sheet"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Hapus film"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <h2>Hapus dari voting?</h2>
-              <p>Film tetap tersimpan di library.</p>
-              <button
-                className="primary-button"
-                disabled={busy}
-                onClick={() =>
-                  void run(async () => {
-                    await request(
-                      "admin/movie",
-                      { id: confirmDelete },
-                      "DELETE",
-                    );
-                    setConfirmDelete("");
-                    await load();
-                  })
-                }
-              >
-                Hapus
-              </button>
-              <button
-                className="logout-button"
-                onClick={() => setConfirmDelete("")}
-              >
-                Batal
-              </button>
-            </section>
-          </div>
+          <ConfirmDialog
+            title={
+              confirmDelete.kind === "playlist"
+                ? "Hapus playlist?"
+                : "Hapus dari voting?"
+            }
+            description={
+              confirmDelete.kind === "playlist"
+                ? `Playlist ${confirmDelete.title} beserta film dan hasil votenya akan dihapus dari periode ini. Film tetap tersimpan di Library.`
+                : `${confirmDelete.title} tetap tersimpan di Library.`
+            }
+            confirmLabel={
+              confirmDelete.kind === "playlist"
+                ? "Hapus playlist"
+                : "Hapus film"
+            }
+            busy={busy}
+            error={message}
+            onDismiss={() => {
+              setMessage("");
+              setConfirmDelete(null);
+            }}
+            onConfirm={() =>
+              void run(async () => {
+                const { kind, id } = confirmDelete;
+                await request(`admin/${kind}`, { id }, "DELETE");
+                if (kind === "movie")
+                  setDraft((m) => (m?.id === id ? null : m));
+                setConfirmDelete(null);
+                await load();
+                if (kind === "playlist") setMessage("Playlist dihapus.");
+              })
+            }
+          />
         )}
       </main>
     </div>

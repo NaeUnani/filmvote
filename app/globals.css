@@ -1386,16 +1386,28 @@ details > a {
 .admin-collection {
   padding: 0 24px;
 }
-.admin-collection h3 {
+.admin-playlist-heading {
+  margin: 20px 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.admin-playlist-heading .danger {
+  flex-shrink: 0;
+  color: #ca9b7e;
+}
+.admin-playlist-heading h3 {
   font-size: 12px;
-  margin: 27px 0 6px;
+  flex: 1;
   display: flex;
   justify-content: space-between;
+  gap: 8px;
 }
-.admin-collection h3 > span {
+.admin-playlist-heading h3 > span {
   font-size: 9px;
   font-weight: 400;
   color: #a68d70;
+  white-space: nowrap;
 }
 .admin-movie {
   display: flex;
@@ -1444,6 +1456,15 @@ details > a {
   width: 100%;
   margin-top: 30px;
   padding: 12px;
+}
+.confirm-sheet {
+  inset: 0;
+  margin: auto auto 0;
+  color: inherit;
+}
+.confirm-sheet::backdrop {
+  background: #0009;
+  backdrop-filter: blur(6px);
 }
 .confirm-sheet h2 {
   font-size: 24px;

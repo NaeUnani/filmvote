@@ -5,11 +5,14 @@ import {
   vote,
   saveMovie,
   deleteMovie,
+  deletePlaylist,
   updateConfig,
   rateLimit,
   setSchedule,
 } from "@/lib/store";
 import { voterId, isAdmin, passwordMatches, createSession } from "@/lib/auth";
+import { initialMovies } from "@/lib/seed";
+import { translateSynopsis } from "@/lib/translate";
 import { youtubeId, movieTitle } from "@/lib/youtube";
 import type { Movie } from "@/lib/types";
 export const runtime = "nodejs";
@@ -70,14 +73,18 @@ async function handle(req: NextRequest, ctx: Context) {
       res.cookies.delete("fv_admin");
       return res;
     }
-    if (req.method === "POST" && path === "vote") {
+    if (path === "vote" && (req.method === "POST" || req.method === "DELETE")) {
       if (!(await rateLimit("vote:" + voter, 30, 60)))
         return json(
           { error: "Terlalu banyak permintaan. Coba sebentar lagi." },
           429,
         );
       const body = await req.json();
-      const result = await vote(voter, text(body.movieId, 80));
+      const result = await vote(
+        voter,
+        text(body.movieId, 80),
+        req.method === "DELETE",
+      );
       const errors: Record<string, string> = {
         closed: "Voting sedang ditutup.",
         missing: "Film tidak ditemukan.",
@@ -135,7 +142,8 @@ async function handle(req: NextRequest, ctx: Context) {
       const id = youtubeId(text(b.url, 500));
       if (!id) return json({ error: "Masukkan link YouTube yang valid." }, 400);
       let title = text(b.title, 150),
-        warning = "";
+        warning = "",
+        sourceSynopsis = "";
       if (!title) {
         try {
           const r = await fetch(
@@ -195,6 +203,7 @@ async function handle(req: NextRequest, ctx: Context) {
               : "Film tidak ditemukan. Koreksi judul atau tahun lalu cari lagi.";
         else {
           const clean = (x: string) => (x === "N/A" ? "" : x || "");
+          sourceSynopsis = text(clean(m.Plot), 1000);
           Object.assign(movie, {
             title: m.Title,
             year: clean(m.Year),
@@ -202,7 +211,6 @@ async function handle(req: NextRequest, ctx: Context) {
             genre: clean(m.Genre),
             actors: clean(m.Actors),
             director: clean(m.Director),
-            synopsis: clean(m.Plot),
             imdb: clean(m.imdbRating),
             imdbId: clean(m.imdbID),
             tomatoes: clean(
@@ -214,7 +222,23 @@ async function handle(req: NextRequest, ctx: Context) {
           });
         }
       }
-      return json({ movie, warning });
+      if (sourceSynopsis) {
+        movie.synopsis = text(await translateSynopsis(sourceSynopsis), 1000);
+      }
+      if (!movie.synopsis) {
+        movie.synopsis =
+          initialMovies.find(
+            (m) => m.youtubeId === id || m.imdbId === movie.imdbId,
+          )?.synopsis || "";
+      }
+      if (sourceSynopsis && !movie.synopsis)
+        warning =
+          "Terjemahan otomatis gagal. Isi sinopsis bahasa Indonesia dari referensi OMDb.";
+      return json({
+        movie,
+        warning,
+        sourceSynopsis: movie.synopsis ? "" : sourceSynopsis,
+      });
     }
     if (req.method === "POST" && path === "admin/movie") {
       const b = await req.json();
@@ -270,6 +294,13 @@ async function handle(req: NextRequest, ctx: Context) {
         name,
         description: text(b.description, 140),
       });
+      return json({ ok: true });
+    }
+    if (req.method === "DELETE" && path === "admin/playlist") {
+      const b = await req.json();
+      const id = text(b.id, 80);
+      if (!id) return json({ error: "Playlist wajib dipilih." }, 400);
+      await deletePlaylist(id);
       return json({ ok: true });
     }
     if (req.method === "POST" && path === "admin/voting") {
